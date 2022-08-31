@@ -1,3 +1,5 @@
+pub(crate) mod minefield;
+
 use notan::prelude::*;
 
 #[notan_main]
