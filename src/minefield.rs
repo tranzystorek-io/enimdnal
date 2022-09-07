@@ -1,5 +1,7 @@
 use std::collections::{VecDeque, HashSet};
 use notan::math::rand::*;
+use std::ops::Range;
+use notan::math::rand::seq::IteratorRandom;
 
 pub const BEGINNER: Params = Params {
     width: 8,
@@ -58,7 +60,7 @@ pub struct Tile {
 #[derive(Debug)]
 pub struct Board {
     tiles: Vec<Tile>,
-    covered_count: usize,
+    covered: usize,
     params: Params,
     placed: bool,
     defeat: bool,
@@ -86,10 +88,6 @@ impl Tile {
         self.cover
     }
 
-    pub fn uncover(&mut self) {
-        self.cover = Cover::Down;
-    }
-
     pub fn object(&self) -> Object {
         self.object
     }
@@ -112,7 +110,7 @@ impl Board {
         let size = params.width * params.height;
         Self {
             tiles: vec![Tile::new(); size],
-            covered_count: size,
+            covered: size,
             placed: false,
             defeat: false,
             params,
@@ -136,12 +134,12 @@ impl Board {
     }
 
     pub fn tile(&self, x: usize, y: usize) -> Tile {
-        let index = Self::coords_to_index(&self.params, x, y);
+        let index = self.coords_to_index(x, y);
         self.tiles[index]
     }
 
     pub fn is_victory(&self) -> bool {
-        !self.defeat && self.covered_count == self.params.mines
+        !self.defeat && self.covered == self.params.mines
     }
 
     pub fn is_defeat(&self) -> bool {
@@ -159,12 +157,21 @@ impl Board {
     /// Uncovering every non-mine tile is the win condition.
     /// Note that the mine tiles are **not** required to be flagged (looking at you, speedrunners).
     pub fn handle_uncover(&mut self, x: usize, y: usize) {
-        let tile_idx = Self::coords_to_index(&self.params, x, y);
+        let tile_idx = self.coords_to_index(x, y);
+
+        if !self.placed {
+            self.place_mines(&[tile_idx]);
+            self.place_hints();
+        }
+
         match self.tiles[tile_idx].cover {
-            Cover::Up(_) => {
-                self.tiles[tile_idx].uncover();
-                if self.covered_count > self.params.mines {
-                    self.covered_count -= 1;
+            Cover::Up(mark) => {
+                if matches!(mark, Mark::Flag) {
+                    return;
+                }
+                self.tiles[tile_idx].cover = Cover::Down;
+                if self.covered > self.params.mines {
+                    self.covered -= 1;
                 }
                 match self.tiles[tile_idx].object {
                     Object::Mine => self.defeat = true,
@@ -181,7 +188,7 @@ impl Board {
     /// Corresponds to the action of cycling through
     /// available covered-field marks (the [Mark] type).
     pub fn handle_mark(&mut self, x: usize, y: usize) {
-        let tile_idx = Self::coords_to_index(&self.params, x, y);
+        let tile_idx = self.coords_to_index(x, y);
         if let Cover::Up(mark) = self.tiles[tile_idx].cover {
             match mark {
                 Mark::Flag => self.tiles[tile_idx].cover = Cover::Up(Mark::Unsure),
@@ -199,19 +206,18 @@ impl Board {
     /// starting from a player-uncovered tile
     /// and stopping on already uncovered tiles and hint tiles.
     fn flood_uncover(&mut self, x: usize, y: usize) {
-        let all_tiles = &mut self.tiles;
         let mut tile_pos = VecDeque::new();
         tile_pos.push_back((x, y));
 
         while let Some(tile) = tile_pos.pop_front() {
-            let t_idx = Self::coords_to_index(&self.params, tile.0, tile.1);
-            if all_tiles[t_idx].is_uncoverable() && !all_tiles[t_idx].is_mine() {
-                all_tiles[t_idx].uncover();
-                if self.covered_count > self.params.mines {
-                    self.covered_count -= 1;
+            let t_idx = self.coords_to_index(tile.0, tile.1);
+            if self.tiles[t_idx].is_uncoverable() && !self.tiles[t_idx].is_mine() {
+                self.tiles[t_idx].cover = Cover::Down;
+                if self.covered > self.params.mines {
+                    self.covered -= 1;
                 }
 
-                if !all_tiles[t_idx].is_hint() {
+                if !self.tiles[t_idx].is_hint() {
                     let min_x = if tile.0 > 0 { tile.0 - 1 } else { 0 };
                     let max_x = if tile.0 < self.params.width { tile.0 + 1 } else { tile.0 };
                     let min_y = if tile.1 > 0 { tile.1 - 1 } else { 0 };
@@ -219,8 +225,8 @@ impl Board {
 
                     for i in min_x..=max_x {
                         for j in min_y..=max_y {
-                            let idx = Self::coords_to_index(&self.params, i, j);
-                            if all_tiles[idx].is_uncoverable() {
+                            let idx = self.coords_to_index(i, j);
+                            if self.tiles[idx].is_uncoverable() {
                                 tile_pos.push_back((i, j));
                             }
                         }
@@ -233,8 +239,8 @@ impl Board {
     /// Get single dimension index of 2D tile
     ///
     /// This method exists purely because borrow checker took me hostage :)
-    fn coords_to_index(params: &Params, x: usize, y: usize) -> usize {
-        y * params.width + x
+    fn coords_to_index(&self, x: usize, y: usize) -> usize {
+        y * self.params.width + x
     }
 
     /// Place mines on the field.
@@ -244,29 +250,18 @@ impl Board {
     fn place_mines(&mut self, skip: &[usize]) {
         // i would put (usize, usize) here, since its just one point user clicks on + eventual flood
         // and then have this method be called in handle_uncover at the beginning
-        if self.placed {
-            return;
-        }
         self.placed = true;
-        let mut set = HashSet::new();
         let mut rng = thread_rng();
+        let idx_range = Range { start: 0, end: self.params.height * self.params.height };
 
-        for i in skip {
-            set.insert(*i);
-        }
-
-        while set.len() < self.params.mines {
-            let mine_idx: usize = rng.gen::<usize>() % self.tiles.len();
-            if !set.contains(&mine_idx) {
-
+        for i in 0..self.params.mines {
+            while let Some(mine_idx) = idx_range.clone().choose(&mut rng) {
+                if skip.contains(&mine_idx) {
+                    continue;
+                }
+                self.tiles[mine_idx].object = Object::Mine;
             }
         }
-
-        while let Some(index) = set.iter().next() {
-            self.tiles[*index].object = Object::Mine;
-        }
-
-        self.place_hints();
     }
 
     fn place_hints(&mut self) {
