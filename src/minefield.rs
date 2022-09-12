@@ -1,7 +1,8 @@
-use std::collections::{VecDeque, HashSet};
-use notan::math::rand::*;
-use std::ops::Range;
 use notan::math::rand::seq::IteratorRandom;
+use notan::math::rand::*;
+use std::cmp::min;
+use std::collections::{HashSet, VecDeque};
+use std::ops::Range;
 
 pub const BEGINNER: Params = Params {
     width: 8,
@@ -139,7 +140,7 @@ impl Board {
     }
 
     pub fn is_victory(&self) -> bool {
-        !self.defeat && self.covered == self.params.mines
+        self.covered == self.params.mines
     }
 
     pub fn is_defeat(&self) -> bool {
@@ -160,6 +161,7 @@ impl Board {
         let tile_idx = self.coords_to_index(x, y);
 
         if !self.placed {
+            self.placed = true;
             self.place_mines(&[tile_idx]);
             self.place_hints();
         }
@@ -176,10 +178,10 @@ impl Board {
                 match self.tiles[tile_idx].object {
                     Object::Mine => self.defeat = true,
                     Object::Blank => self.flood_uncover(x, y),
-                    _ => ()
+                    _ => (),
                 }
             }
-            Cover::Down => () //OPTIONAL: on uncover additional action when clicking hint
+            Cover::Down => (), //OPTIONAL: on uncover additional action when clicking hint
         }
     }
 
@@ -189,13 +191,35 @@ impl Board {
     /// available covered-field marks (the [Mark] type).
     pub fn handle_mark(&mut self, x: usize, y: usize) {
         let tile_idx = self.coords_to_index(x, y);
-        if let Cover::Up(mark) = self.tiles[tile_idx].cover {
-            match mark {
-                Mark::Flag => self.tiles[tile_idx].cover = Cover::Up(Mark::Unsure),
-                Mark::Unsure => self.tiles[tile_idx].cover = Cover::Up(Mark::None),
-                Mark::None => self.tiles[tile_idx].cover = Cover::Up(Mark::Flag),
-            }
+        if let Cover::Up(mark) = &mut self.tiles[tile_idx].cover {
+            mark.cycle();
         }
+    }
+
+    fn neighbours(&self, x: usize, y: usize) -> impl Iterator<Item = (usize, usize)> {
+        let offsets = [
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ];
+        let width = self.params.width;
+        let height = self.params.height;
+
+        offsets.into_iter().filter_map(move |(off_x, off_y)| {
+            let new_x = (x as i32 + off_x);
+            let new_y = (y as i32 + off_y);
+            let new_x_inbounds = new_x >= 0 && new_x < width as i32;
+            let new_y_inbounds = new_y >= 0 && new_y < height as i32;
+            if new_x_inbounds && new_y_inbounds {
+                return Some((new_x as _, new_y as _));
+            }
+            None
+        })
     }
 
     /// A flood-fill-style uncovering procedure,
@@ -207,9 +231,13 @@ impl Board {
     /// and stopping on already uncovered tiles and hint tiles.
     fn flood_uncover(&mut self, x: usize, y: usize) {
         let mut tile_pos = VecDeque::new();
+        let mut visited = HashSet::new();
         tile_pos.push_back((x, y));
 
         while let Some(tile) = tile_pos.pop_front() {
+            if !visited.insert(tile) {
+                continue;
+            }
             let t_idx = self.coords_to_index(tile.0, tile.1);
             if self.tiles[t_idx].is_uncoverable() && !self.tiles[t_idx].is_mine() {
                 self.tiles[t_idx].cover = Cover::Down;
@@ -218,17 +246,9 @@ impl Board {
                 }
 
                 if !self.tiles[t_idx].is_hint() {
-                    let min_x = if tile.0 > 0 { tile.0 - 1 } else { 0 };
-                    let max_x = if tile.0 < self.params.width { tile.0 + 1 } else { tile.0 };
-                    let min_y = if tile.1 > 0 { tile.1 - 1 } else { 0 };
-                    let max_y = if tile.1 < self.params.height { tile.1 + 1 } else { tile.1 };
-
-                    for i in min_x..=max_x {
-                        for j in min_y..=max_y {
-                            let idx = self.coords_to_index(i, j);
-                            if self.tiles[idx].is_uncoverable() {
-                                tile_pos.push_back((i, j));
-                            }
+                    for (xx, yy) in self.neighbours(tile.0, tile.1) {
+                        if self.tiles[self.coords_to_index(xx, yy)].is_uncoverable() {
+                            tile_pos.push_back((xx, yy));
                         }
                     }
                 }
@@ -236,9 +256,7 @@ impl Board {
         }
     }
 
-    /// Get single dimension index of 2D tile
-    ///
-    /// This method exists purely because borrow checker took me hostage :)
+    /// Get single dimension index of 2D tile in tiles array
     fn coords_to_index(&self, x: usize, y: usize) -> usize {
         y * self.params.width + x
     }
@@ -250,21 +268,36 @@ impl Board {
     fn place_mines(&mut self, skip: &[usize]) {
         // i would put (usize, usize) here, since its just one point user clicks on + eventual flood
         // and then have this method be called in handle_uncover at the beginning
-        self.placed = true;
         let mut rng = thread_rng();
-        let idx_range = Range { start: 0, end: self.params.height * self.params.height };
+        let idx_range = Range {
+            start: 0,
+            end: self.tiles.len(),
+        };
 
-        for i in 0..self.params.mines {
-            while let Some(mine_idx) = idx_range.clone().choose(&mut rng) {
-                if skip.contains(&mine_idx) {
-                    continue;
-                }
-                self.tiles[mine_idx].object = Object::Mine;
-            }
+        let mines = idx_range
+            .filter(|i| !skip.contains(i))
+            .choose_multiple(&mut rng, self.params.mines);
+
+        for mine in &mines {
+            self.tiles[*mine].object = Object::Mine;
         }
     }
 
     fn place_hints(&mut self) {
-        //TODO: Place hints here
+        for x in 0..self.params.width {
+            for y in 0..self.params.height {
+                let idx = self.coords_to_index(x, y);
+                if self.tiles[idx].is_mine() {
+                    continue;
+                }
+                let mine_count = self
+                    .neighbours(x, y)
+                    .filter(|pos| self.tiles[self.coords_to_index(pos.0, pos.1)].is_mine())
+                    .count();
+                if mine_count > 0 {
+                    self.tiles[idx].object = Object::Hint(mine_count as _);
+                }
+            }
+        }
     }
 }
