@@ -1,6 +1,5 @@
 use notan::math::rand::seq::IteratorRandom;
 use notan::math::rand::*;
-use std::cmp::min;
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
@@ -166,22 +165,18 @@ impl Board {
             self.place_hints();
         }
 
-        match self.tiles[tile_idx].cover {
-            Cover::Up(mark) => {
-                if matches!(mark, Mark::Flag) {
-                    return;
-                }
-                self.tiles[tile_idx].cover = Cover::Down;
-                if self.covered > self.params.mines {
-                    self.covered -= 1;
-                }
-                match self.tiles[tile_idx].object {
-                    Object::Mine => self.defeat = true,
-                    Object::Blank => self.flood_uncover(x, y),
-                    _ => (),
-                }
-            }
-            Cover::Down => (), //OPTIONAL: on uncover additional action when clicking hint
+        if !self.tiles[tile_idx].is_uncoverable() {
+            return;
+        }
+
+        self.tiles[tile_idx].cover = Cover::Down;
+        if self.covered > self.params.mines {
+            self.covered -= 1;
+        }
+        match self.tiles[tile_idx].object {
+            Object::Mine => self.defeat = true,
+            Object::Blank => self.flood_uncover(x, y),
+            Object::Hint(_) => (),
         }
     }
 
@@ -207,18 +202,19 @@ impl Board {
             (1, 0),
             (1, 1),
         ];
+        // copy these values to avoid borrowing `self` in the closure
         let width = self.params.width;
         let height = self.params.height;
 
         offsets.into_iter().filter_map(move |(off_x, off_y)| {
-            let new_x = (x as i32 + off_x);
-            let new_y = (y as i32 + off_y);
+            let new_x = x as i32 + off_x;
+            let new_y = y as i32 + off_y;
             let new_x_inbounds = new_x >= 0 && new_x < width as i32;
             let new_y_inbounds = new_y >= 0 && new_y < height as i32;
-            if new_x_inbounds && new_y_inbounds {
-                return Some((new_x as _, new_y as _));
+            if !(new_x_inbounds && new_y_inbounds) {
+                return None;
             }
-            None
+            Some((new_x as _, new_y as _))
         })
     }
 
@@ -266,8 +262,6 @@ impl Board {
     /// The `skip` argument contains board indices
     /// that shall not have a mine placed in.
     fn place_mines(&mut self, skip: &[usize]) {
-        // i would put (usize, usize) here, since its just one point user clicks on + eventual flood
-        // and then have this method be called in handle_uncover at the beginning
         let mut rng = thread_rng();
         let idx_range = Range {
             start: 0,
@@ -278,8 +272,8 @@ impl Board {
             .filter(|i| !skip.contains(i))
             .choose_multiple(&mut rng, self.params.mines);
 
-        for mine in &mines {
-            self.tiles[*mine].object = Object::Mine;
+        for mine in mines {
+            self.tiles[mine].object = Object::Mine;
         }
     }
 
@@ -292,7 +286,7 @@ impl Board {
                 }
                 let mine_count = self
                     .neighbours(x, y)
-                    .filter(|pos| self.tiles[self.coords_to_index(pos.0, pos.1)].is_mine())
+                    .filter(|(xx, yy)| self.tiles[self.coords_to_index(*xx, *yy)].is_mine())
                     .count();
                 if mine_count > 0 {
                     self.tiles[idx].object = Object::Hint(mine_count as _);
