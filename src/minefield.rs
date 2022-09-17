@@ -161,7 +161,12 @@ impl Board {
 
         if !self.placed {
             self.placed = true;
-            self.place_mines(&[tile_idx]);
+            let mut skip = self
+                .neighbours(x, y)
+                .map(|(xx, yy)| self.coords_to_index(xx, yy))
+                .collect::<Vec<_>>();
+            skip.push(tile_idx);
+            self.place_mines(&skip);
             self.place_hints();
         }
 
